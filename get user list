@@ -1,0 +1,103 @@
+// API URL: http://surgbay.com/wp-json/surgbay-api/v1/users/?role=yith_vendor
+
+add_action('rest_api_init', function () {
+    register_rest_route('surgbay-api/v1', '/users/', array(
+        'methods' => 'GET',
+        'callback' => 'get_user_list',
+        'permission_callback' => 'check_basic_auth',
+    ));
+});
+
+function get_user_list()
+{
+    $role = isset($_GET['role']) ? sanitize_text_field($_GET['role']) : '';
+    $email = isset($_GET['email']) ? sanitize_email($_GET['email']) : '';
+
+    global $wpdb;
+
+    $query = " SELECT 
+        u.ID, 
+        u.user_login, 
+        u.user_email, 
+        u.display_name, 
+        u.user_pass, 
+        um.meta_value as capabilities
+    FROM 
+        $wpdb->users u
+    LEFT JOIN 
+        $wpdb->usermeta um ON u.ID = um.user_id 
+    AND 
+        um.meta_key = '{$wpdb->prefix}capabilities'";
+
+    // Add a condition to the query if an email is provided
+    if (!empty($email)) {
+        $query .= $wpdb->prepare(" WHERE u.user_email = %s", $email);
+    }
+
+    $users = $wpdb->get_results($query);
+
+    if (empty($users)) {
+        return new WP_Error('error', 'No users found', array('status' => 404));
+    }
+
+    $user_list = array();
+    foreach ($users as $user) {
+        // Unserialize the capabilities to get the user role
+        $roles = maybe_unserialize($user->capabilities);
+
+        // If a role parameter is provided, check if it matches exactly one of the roles
+        if (!empty($role)) {
+            if (is_array($roles) && array_key_exists($role, $roles)) {
+
+                $vendor_user_id = $user->ID;
+                $vendor_id = get_user_meta($vendor_user_id, yith_wcmv_get_user_meta_key(), true);
+                $vendor = yith_wcmv_get_vendor($vendor_id);
+                $admins = YITH_Vendors_Staff()->get_vendor_admins($vendor);
+                $staff_members = [];
+
+                if (!empty($admins)) {
+                    if ($vendor->get_owner() == $user->ID) {
+                        foreach ($admins as $staff_id) {
+                            $staff_obj = get_user_by('id', $staff_id);
+                            $staff_members[] = array(
+                                'ID' => $staff_obj->ID,
+                                'username' => $staff_obj->user_login,
+                                'email' => $staff_obj->user_email,
+                                'display_name' => $staff_obj->display_name,
+                                'role' => $staff_obj->roles, // User role
+                            );
+                        }
+                    }
+                }
+
+                if ($vendor->get_owner() == $user->ID) {
+                    $user_list[] = array(
+                        'ID' => $user->ID,
+                        'store_name' => $vendor->get_name(),
+                        'username' => $user->user_login,
+                        'email' => $user->user_email,
+                        'display_name' => $user->display_name,
+                        'password' => $user->user_pass, // Hashed password
+                        'role' => $role, // User role
+                        'staff' => $staff_members ? $staff_members : ""
+                    );
+                }
+
+            }
+        } else {
+            // If no role parameter, include all users
+            $user_role = !empty($roles) ? array_keys($roles)[0] : '';
+            $user_list[] = array(
+                'ID' => $user->ID,
+                'username' => $user->user_login,
+                'email' => $user->user_email,
+                'display_name' => $user->display_name,
+                'password' => $user->user_pass, // Hashed password
+                'role' => $user_role, // User role
+            );
+        }
+    }
+
+    return rest_ensure_response($user_list);
+
+}
